@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cinebook
+      POSTGRES_PASSWORD: cinebook
+      POSTGRES_DB: cinebook
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinebook -d cinebook"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql://cinebook:cinebook@postgres:5432/cinebook?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: change-me-in-production
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      FRONTEND_URL: http://localhost:5174
+      PORT: 4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && node dist/prisma/seed.js && npm start"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:4000/api/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql://cinebook:cinebook@postgres:5432/cinebook?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: change-me-in-production
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: sh -c "npm run worker:start"
+    healthcheck:
+      test: ["CMD-SHELL", "npm run worker:health"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 15s
+
+volumes:
+  postgres-data:

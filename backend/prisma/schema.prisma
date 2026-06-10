@@ -1,0 +1,274 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  HALL_MANAGER
+  ADMIN
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum SeatHoldStatus {
+  ACTIVE
+  RELEASED
+  EXPIRED
+  CONVERTED
+}
+
+enum ChatSender {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model User {
+  id                 String              @id @default(cuid())
+  name               String
+  email              String              @unique
+  phone              String?             @unique
+  phoneVerified      Boolean             @default(false)
+  disabled           Boolean             @default(false)
+  passwordHash       String
+  role               Role                @default(USER)
+  bookings           Booking[]
+  payments           Payment[]
+  seatHolds          SeatHold[]
+  managedScreens     ScreenManager[]
+  activityLogs       ActivityLog[]       @relation("ActivityActor")
+  chatConversations  ChatConversation[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+}
+
+model Movie {
+  id          String   @id @default(cuid())
+  title       String
+  slug        String   @unique
+  synopsis    String
+  language    String
+  genre       String
+  rating      String
+  durationMin Int
+  posterUrl   String
+  backdropUrl String
+  trailerUrl  String?
+  cast        String[]
+  releaseDate DateTime
+  shows       Show[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Theater {
+  id        String   @id @default(cuid())
+  chain     String   @default("CineBook")
+  name      String
+  city      String
+  address   String
+  screens   Screen[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Screen {
+  id        String   @id @default(cuid())
+  name      String
+  type      String   @default("Standard")
+  format    String   @default("2D")
+  equipment String[] @default([])
+  theaterId String
+  theater   Theater  @relation(fields: [theaterId], references: [id], onDelete: Cascade)
+  seats     Seat[]
+  shows     Show[]
+  managers  ScreenManager[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Seat {
+  id           String        @id @default(cuid())
+  screenId     String
+  screen       Screen        @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  row          String
+  number       Int
+  type         String
+  priceModifier Int          @default(0)
+  bookingSeats BookingSeat[]
+  holds        SeatHold[]
+
+  @@unique([screenId, row, number])
+}
+
+model Show {
+  id           String        @id @default(cuid())
+  movieId      String
+  movie        Movie         @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  screenId     String
+  screen       Screen        @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  startsAt     DateTime
+  basePrice    Int
+  bookingSeats BookingSeat[]
+  bookings     Booking[]
+  holds        SeatHold[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([movieId, startsAt])
+  @@index([screenId, startsAt])
+}
+
+model Booking {
+  id              String          @id @default(cuid())
+  userId          String
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  showId          String
+  show            Show            @relation(fields: [showId], references: [id], onDelete: Cascade)
+  status          BookingStatus   @default(PENDING)
+  paymentStatus   PaymentStatus   @default(PENDING)
+  totalAmount     Int
+  confirmationCode String         @unique
+  seats           BookingSeat[]
+  payments        Payment[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([userId, createdAt])
+}
+
+model BookingSeat {
+  id        String   @id @default(cuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  showId    String
+  show      Show     @relation(fields: [showId], references: [id], onDelete: Cascade)
+  seatId    String
+  seat      Seat     @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  price     Int
+  active    Boolean  @default(true)
+
+  @@index([bookingId])
+  @@index([showId, seatId, active])
+}
+
+model ScreenManager {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  screenId  String
+  screen    Screen   @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, screenId])
+  @@index([screenId])
+}
+
+model PhoneVerification {
+  id          String   @id @default(cuid())
+  phone       String
+  code        String
+  verified    Boolean  @default(false)
+  expiresAt   DateTime
+  attempts    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([phone, createdAt])
+}
+
+model SeatHold {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  showId    String
+  show      Show           @relation(fields: [showId], references: [id], onDelete: Cascade)
+  seatId    String
+  seat      Seat           @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  status    SeatHoldStatus @default(ACTIVE)
+  active    Boolean        @default(true)
+  expiresAt DateTime
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([showId, seatId, active])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookingId     String
+  booking       Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  amount        Int
+  status        PaymentStatus @default(PENDING)
+  cardLast4     String
+  transactionId String        @unique
+  failureReason String?
+  refundedAt    DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([bookingId])
+  @@index([userId, createdAt])
+}
+
+model ActivityLog {
+  id             String   @id @default(cuid())
+  actorId        String?
+  actor          User?    @relation("ActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+  action         String
+  entityType     String?
+  entityId       String?
+  success        Boolean
+  durationMs     Int
+  requestId      String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@index([requestId])
+}
+
+model ChatConversation {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String        @default("Movie assistant")
+  context   Json          @default("{}")
+  messages  ChatMessage[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([userId, updatedAt])
+}
+
+model ChatMessage {
+  id             String           @id @default(cuid())
+  conversationId String
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         ChatSender
+  content        String
+  actions        Json?
+  createdAt      DateTime         @default(now())
+
+  @@index([conversationId, createdAt])
+}
