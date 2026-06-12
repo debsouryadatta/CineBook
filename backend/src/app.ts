@@ -15,13 +15,19 @@ import { aiRouter } from "./routes/ai.js";
 import { chatRouter } from "./routes/chat.js";
 import { managerRouter } from "./routes/manager.js";
 import { adminRouter } from "./routes/admin.js";
-import { errorHandler, notFound } from "./utils/errors.js";
+import { AppError, errorHandler, notFound } from "./utils/errors.js";
 
 export const app = express();
 
 app.use(helmet());
+const configuredOrigins = [env.FRONTEND_URL, env.FRONTEND_URLS]
+  .flatMap((value) => value?.split(",") ?? [])
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 const allowedOrigins = new Set([
-  env.FRONTEND_URL,
+  ...configuredOrigins,
+  "https://cine-book-liard.vercel.app",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:5174",
@@ -36,7 +42,7 @@ app.use(
       if (!origin || allowedOrigins.has(origin) || /^https?:\/\/(?:localhost|127\.0\.0\.1):517\d$/.test(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Not allowed by CORS"));
+      return callback(new AppError(403, "Not allowed by CORS"));
     },
     credentials: true
   })

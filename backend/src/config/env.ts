@@ -36,6 +36,7 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(12).default("dev-secret-change-me"),
   OPENAI_API_KEY: z.string().optional(),
   FRONTEND_URL: z.string().default("http://localhost:5173"),
+  FRONTEND_URLS: z.string().optional(),
   PORT: z.coerce.number().default(4000)
 });
 
