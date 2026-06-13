@@ -8,6 +8,7 @@ import { AppError } from "../utils/errors.js";
 import { createBooking } from "./bookingService.js";
 import { logActivity } from "./activityLog.js";
 import { getOpenAIClient, OPENAI_MODEL } from "./openai.js";
+import { movieSearchScore, rankSearchableMovies } from "./movieSearch.js";
 import { processPayment } from "./paymentService.js";
 import { createSeatHold, expireSeatHolds, releaseSeatHolds } from "./seatHoldService.js";
 
@@ -424,20 +425,8 @@ function matchesTimeOfDay(date: Date, timeOfDay?: ChatToolArgs["timeOfDay"]) {
 
 function movieWhere(args: ChatToolArgs, context?: Record<string, unknown>): Prisma.MovieWhereInput {
   const filters: Prisma.MovieWhereInput[] = [];
-  const query = args.query ?? args.movieTitle ?? contextText(context ?? {}, "lastMovieTitle");
 
   if (args.movieId) filters.push({ id: args.movieId });
-  if (args.movieTitle) filters.push({ title: { contains: args.movieTitle, mode: "insensitive" } });
-  if (query) {
-    filters.push({
-      OR: [
-        { title: { contains: query, mode: "insensitive" } },
-        { synopsis: { contains: query, mode: "insensitive" } },
-        { genre: { contains: query, mode: "insensitive" } },
-        { language: { contains: query, mode: "insensitive" } }
-      ]
-    });
-  }
   if (args.genre) filters.push({ genre: { contains: args.genre, mode: "insensitive" } });
   if (args.language) filters.push({ language: { contains: args.language, mode: "insensitive" } });
   if (args.ageRating) filters.push({ rating: { contains: args.ageRating, mode: "insensitive" } });
@@ -461,10 +450,28 @@ function showWhere(args: ChatToolArgs, context?: Record<string, unknown>): Prism
   return { AND: filters };
 }
 
+// Show times are stored as UTC but the storefront is India-only, so surface a
+// ready-made India Standard Time label for the assistant to quote verbatim
+// instead of letting it reformat the raw ISO string (which reads as UTC).
+const IST_SHOW_LABEL_FORMATTER = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true
+});
+
+function formatShowLabel(date: Date) {
+  return `${IST_SHOW_LABEL_FORMATTER.format(date)} IST`;
+}
+
 function serializeShow(show: ShowWithDetails) {
   return {
     id: show.id,
     startsAt: show.startsAt.toISOString(),
+    startsAtLabel: formatShowLabel(show.startsAt),
     basePrice: show.basePrice,
     movie: {
       id: show.movie.id,
@@ -538,6 +545,7 @@ function serializeBooking(booking: BookingWithDetails) {
 
 async function resolveMovie(args: ChatToolArgs, context: Record<string, unknown>) {
   const id = args.movieId ?? contextText(context, "lastMovieId");
+  const query = args.query ?? args.movieTitle ?? contextText(context, "lastMovieTitle");
   if (id) {
     const movie = await prisma.movie.findUnique({
       where: { id },
@@ -546,11 +554,14 @@ async function resolveMovie(args: ChatToolArgs, context: Record<string, unknown>
     if (movie) return movie;
   }
 
-  return prisma.movie.findFirst({
+  const movies = await prisma.movie.findMany({
     where: movieWhere(args, context),
     include: { shows: { where: { startsAt: { gte: new Date() } }, take: 3, orderBy: { startsAt: "asc" }, include: { screen: { include: { theater: true } } } } },
-    orderBy: { releaseDate: "desc" }
+    orderBy: { releaseDate: "desc" },
+    take: query ? 20 : 1
   });
+
+  return (query ? rankSearchableMovies(movies, query)[0] : movies[0]) ?? null;
 }
 
 async function resolveShow(args: ChatToolArgs, context: Record<string, unknown>) {
@@ -593,6 +604,24 @@ async function resolveBooking(args: ChatToolArgs, context: ToolExecutionContext)
   });
 }
 
+// Normalises a free-form seat-type request ("recliner seats", "RECLINERS") down
+// to a comparable token so the assistant's phrasing still resolves to a real
+// tier name ("Recliner", "Front Row", ...).
+function normalizeSeatType(value?: string | null) {
+  const text = value
+    ?.trim()
+    .toLowerCase()
+    .replace(/\bseats?\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text || null;
+}
+
+function seatTypeMatches(seatType: string, normalizedFilter: string) {
+  const candidate = seatType.toLowerCase();
+  return candidate.includes(normalizedFilter) || normalizedFilter.includes(candidate);
+}
+
 async function seatAvailability(showId: string, seatType?: string | null) {
   await expireSeatHolds(showId);
   const show = await prisma.show.findUnique({
@@ -619,9 +648,9 @@ async function seatAvailability(showId: string, seatType?: string | null) {
 
   const booked = new Set(show.bookingSeats.map((seat) => seat.seatId));
   const held = new Set(show.holds.map((hold) => hold.seatId));
-  const typeFilter = seatType?.toLowerCase();
+  const typeFilter = normalizeSeatType(seatType);
   const seats = show.screen.seats
-    .filter((seat) => !typeFilter || seat.type.toLowerCase().includes(typeFilter))
+    .filter((seat) => !typeFilter || seatTypeMatches(seat.type, typeFilter))
     .map((seat) => ({
       id: seat.id,
       row: seat.row,
@@ -647,8 +676,9 @@ async function seatAvailability(showId: string, seatType?: string | null) {
 
 const handlers: Record<ChatToolName, ToolHandler> = {
   async search_movies(args, context) {
+    const query = args.query ?? args.movieTitle ?? null;
     const showsFilter: Prisma.ShowWhereInput = { startsAt: { gte: new Date() } };
-    const movies = await prisma.movie.findMany({
+    const movieCandidates = await prisma.movie.findMany({
       where: {
         ...movieWhere(args, context.conversationContext),
         shows:
@@ -671,8 +701,9 @@ const handlers: Record<ChatToolName, ToolHandler> = {
       },
       include: { shows: { where: showsFilter, take: 3, orderBy: { startsAt: "asc" }, include: { screen: { include: { theater: true } } } } },
       orderBy: { releaseDate: "desc" },
-      take: 6
+      take: query ? 30 : 6
     });
+    const movies = rankSearchableMovies(movieCandidates, query ?? "").slice(0, 6);
 
     return { status: "ok", movies: movies.map(serializeMovie) };
   },
@@ -702,13 +733,15 @@ const handlers: Record<ChatToolName, ToolHandler> = {
   },
 
   async get_showtimes(args, context) {
+    const query = args.query ?? args.movieTitle ?? null;
     const shows = await prisma.show.findMany({
       where: showWhere(args, context.conversationContext),
       include: { movie: true, screen: { include: { theater: true } } },
       orderBy: { startsAt: "asc" },
-      take: 20
+      take: query ? 50 : 20
     });
-    const filtered = shows.filter((show) => matchesTimeOfDay(show.startsAt, args.timeOfDay)).slice(0, 8);
+    const searchableShows = query ? shows.filter((show) => movieSearchScore({ ...show.movie, shows: [show] }, query) > 0) : shows;
+    const filtered = searchableShows.filter((show) => matchesTimeOfDay(show.startsAt, args.timeOfDay)).slice(0, 8);
     return { status: "ok", shows: filtered.map(serializeShow) };
   },
 
@@ -859,8 +892,21 @@ const handlers: Record<ChatToolName, ToolHandler> = {
     if (!seatIds.length) {
       const availability = await seatAvailability(show.id, args.seatType);
       seatIds = availability.availableSeats.slice(0, requestedCount).map((seat) => seat.id);
+      if (!seatIds.length) {
+        // Distinguish "this seat type is sold out" from "the show is sold out" so the
+        // assistant can offer the seat types that are actually available.
+        const fullAvailability = args.seatType ? await seatAvailability(show.id) : availability;
+        const availableSeatTypes = Array.from(new Set(fullAvailability.availableSeats.map((seat) => seat.type)));
+        return {
+          status: "not_available",
+          message: args.seatType
+            ? `No ${args.seatType} seats are currently available for this show.`
+            : "No seats are currently available for this show.",
+          availableSeatTypes
+        };
+      }
     }
-    if (!seatIds.length) return { status: "not_available", message: "No matching seats are currently available for this show." };
+    if (!seatIds.length) return { status: "not_available", message: "No seats are currently available for this show." };
 
     const result = await createSeatHold({ showId: show.id, seatIds, userId: context.userId });
     return {
@@ -1285,13 +1331,15 @@ async function executeToolCall(name: string, rawArguments: string | undefined, c
 
 function systemPrompt(context: Record<string, unknown>) {
   return [
-    "You are CineBook's AI movie booking assistant.",
-    `Always use OpenAI model ${OPENAI_MODEL}; the application will execute your tool calls.`,
+    "You are CineBook's AI movie booking assistant. The application executes your tool calls.",
     "Use the provided function tools for facts, IDs, booking operations, payments, preferences, and support. Do not invent movie IDs, show IDs, seat IDs, booking IDs, prices, or payment status.",
     "For complex booking requests, act as the main assistant delegating the operational sequence to a focused booking assistant by chaining tools: search_movies, get_showtimes, check_seat_availability, hold_seats, apply_promo_code, create_booking, start_payment, and confirm_payment when the user provides a card.",
-    "Ask for missing required details instead of guessing destructive or payment operations. Holding seats is allowed when the user asked to reserve or book and enough show/seat preference is known.",
-    "Use previous tool results and conversation context to pass IDs forward. Keep final replies concise, helpful, and conversational.",
-    `Current date/time: ${new Date().toISOString()}.`,
+    "Ask for missing required details instead of guessing destructive or payment operations. Holding seats is allowed when the user asked to reserve or book and a show and seat count are known.",
+    "Only pass a seatType to check_seat_availability or hold_seats when the user explicitly asks for that seat type (for example Recliner or Premium) in their current request. Never assume or default a seat type, and never carry one over from earlier in the chat. When the user does not name a seat type, leave seatType empty so any available seat can be chosen.",
+    "The conversation context JSON below is optional memory from earlier turns. Treat preferred* values as soft hints the user may override at any time, not as requirements, and never use them to silently filter seats, showtimes, or theatres.",
+    "Use previous tool results and conversation context to pass IDs forward. Keep final replies concise, helpful, and conversational. If a requested seat type is unavailable, say so plainly and offer the seat types that are available.",
+    "When telling the user a show's date or time, quote the show's startsAtLabel field (already formatted in India Standard Time). Do not reformat the raw ISO startsAt yourself, and do not state times in UTC.",
+    `Current date/time: ${formatShowLabel(new Date())} (${new Date().toISOString()}).`,
     `Conversation context JSON: ${JSON.stringify(context)}`
   ].join("\n");
 }
@@ -1318,13 +1366,11 @@ function contextPatch(existing: Record<string, unknown>, message: string, execut
   };
 
   for (const tool of executedTools) {
-    if (tool.args.genre) patch.preferredGenre = tool.args.genre;
-    if (tool.args.language) patch.preferredLanguage = tool.args.language;
-    if (tool.args.city) patch.preferredCity = tool.args.city;
-    if (tool.args.timeOfDay) patch.preferredTimeOfDay = tool.args.timeOfDay;
-    if (tool.args.seatType) patch.preferredSeatType = tool.args.seatType;
-    if (tool.args.theaterChain) patch.preferredTheaterChain = tool.args.theaterChain;
-
+    // Preferences are only persisted through the explicit update_preferences tool.
+    // Capturing transient slot values (seatType, genre, city, ...) from any tool call
+    // turns a one-off mention into a standing requirement and silently constrains later
+    // bookings (e.g. defaulting every booking to "Recliner" seats), so it is intentionally
+    // not done here.
     if (tool.name === "update_preferences" && tool.args.preferenceKey && tool.args.preferenceValue) {
       patch[`preferred${tool.args.preferenceKey[0]?.toUpperCase() ?? ""}${tool.args.preferenceKey.slice(1)}`] = tool.args.preferenceValue;
     }

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../config/prisma.js";
 import { getCached, setCached } from "../config/redis.js";
+import { rankSearchableMovies } from "../services/movieSearch.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { AppError } from "../utils/errors.js";
 
@@ -33,15 +34,15 @@ moviesRouter.get(
 moviesRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const city = String(req.query.city ?? "");
-    const q = String(req.query.q ?? "");
-    const genre = String(req.query.genre ?? "");
-    const language = String(req.query.language ?? "");
-    const rating = String(req.query.rating ?? "");
-    const chain = String(req.query.chain ?? "");
-    const screenType = String(req.query.screenType ?? "");
-    const format = String(req.query.format ?? "");
-    const releaseDate = String(req.query.releaseDate ?? "");
+    const city = String(req.query.city ?? "").trim();
+    const q = String(req.query.q ?? "").trim();
+    const genre = String(req.query.genre ?? "").trim();
+    const language = String(req.query.language ?? "").trim();
+    const rating = String(req.query.rating ?? "").trim();
+    const chain = String(req.query.chain ?? "").trim();
+    const screenType = String(req.query.screenType ?? "").trim();
+    const format = String(req.query.format ?? "").trim();
+    const releaseDate = String(req.query.releaseDate ?? "").trim();
     const cacheKey = `movies:${city}:${q}:${genre}:${language}:${rating}:${chain}:${screenType}:${format}:${releaseDate}`;
     const cached = await getCached(cacheKey);
     if (cached) return res.json(cached);
@@ -58,9 +59,8 @@ moviesRouter.get(
       }
     };
 
-    const movies = await prisma.movie.findMany({
+    const movieCandidates = await prisma.movie.findMany({
       where: {
-        title: q ? { contains: q, mode: "insensitive" } : undefined,
         genre: genre ? { equals: genre, mode: "insensitive" } : undefined,
         language: language ? { equals: language, mode: "insensitive" } : undefined,
         rating: rating ? { equals: rating, mode: "insensitive" } : undefined,
@@ -71,11 +71,16 @@ moviesRouter.get(
       include: {
         shows: {
           where: showFilter,
-          select: { id: true },
-          take: 1
+          orderBy: { startsAt: "asc" },
+          include: { screen: { include: { theater: true } } }
         }
       }
     });
+
+    const movies = rankSearchableMovies(movieCandidates, q).map((movie) => ({
+      ...movie,
+      shows: movie.shows.slice(0, 1).map((show) => ({ id: show.id }))
+    }));
 
     const payload = { movies };
     await setCached(cacheKey, payload, 90);
