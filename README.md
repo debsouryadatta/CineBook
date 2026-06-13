@@ -13,6 +13,10 @@ CineBook is a full-stack movie ticket booking app for discovering movies, checki
 - AI movie recommendations and a booking assistant chatbot.
 - Admin and hall-manager flows for users, theatres, screens, shows, reports, and scheduling.
 
+## Architecture Diagram
+
+![CineBook architecture diagram](docs/images/cinebook-architecture.png)
+
 ## Tech Stack
 
 React, TypeScript, Vite, Tailwind CSS, Node.js, Express, Prisma, PostgreSQL, Redis, BullMQ, Docker, and OpenAI.
